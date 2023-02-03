@@ -26,6 +26,24 @@ from lucent.optvis import objectives, transform, param
 from lucent.misc.io import show
 
 
+def gradient_norm_interrupt(_optimizer, params, thresh):
+    """
+    Interrupts the optimization if the mean gradient norm of the last update step was lower than a certain threshhold.
+
+    :param _optimizer: the optimizer (not needed here)
+    :param params: the image parameters
+    :param thresh: the interruption threshold
+
+    :returns: true if the gradient norm was smaller than threshold
+    """
+
+    mean_grad_norm = np.mean(
+        [torch.norm(p.grad, p=2).detach().cpu().numpy() for p in params]
+    )
+
+    return mean_grad_norm < thresh
+
+
 def render_vis(
     model,
     objective_f,
@@ -41,7 +59,17 @@ def render_vis(
     image_name=None,
     show_inline=False,
     fixed_image_size=None,
+    min_steps = 2560,
+    interrupt_interval : int = 0,
+    interrupt_condition=None,
 ):
+    """
+    Adapted version of render_vis that supports interrupting the optimization procedure when a condition is fulfilled.
+    min_steps is the minimum number of steps that should always be made, irrespective of gradient norm
+    interrupt_interval is the number of steps between evaluating the condition
+    interrupt_condition is a function that takes optimizer and params and returns true if the optimization should be interrupted
+    """
+
     if param_f is None:
         param_f = lambda: param.image(128)
     # param_f is a function that should return two things
@@ -89,6 +117,7 @@ def render_vis(
             print("Initial loss: {:.3f}".format(objective_f(hook)))
 
         images = []
+        # grad_norms = []
         try:
             for i in tqdm(range(1, max(thresholds) + 1), disable=(not progress)):
                 def closure():
@@ -118,6 +147,21 @@ def render_vis(
                         if show_inline:
                             show(image)
                     images.append(image)
+
+                # for plotting, to get an idea of what even to expect
+                # mean_grad_norm = np.mean(
+                #     [torch.norm(p.grad, p=2).detach().cpu().numpy() for p in params]
+                # )
+                # grad_norms.append(mean_grad_norm)
+
+                if interrupt_condition is not None and i > min_steps and i % interrupt_interval == 0:
+                    if interrupt_condition(optimizer, params):
+                        if verbose:
+                            print(f"Interrupting due to condition at step {i}")
+                        image = tensor_to_img_array(image_f())
+                        images.append(image)
+                        break
+
         except KeyboardInterrupt:
             print("Interrupted optimization at step {:d}.".format(i))
             if verbose:
@@ -130,7 +174,7 @@ def render_vis(
         show(tensor_to_img_array(image_f()))
     elif show_image:
         view(image_f())
-    return images
+    return images #, grad_norms
 
 
 def tensor_to_img_array(tensor):
