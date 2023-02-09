@@ -26,22 +26,22 @@ from lucent.optvis import objectives, transform, param
 from lucent.misc.io import show
 
 
-def gradient_norm_interrupt(_optimizer, params, thresh):
+def activation_change_interrupt(_optimizer, _params, mean_activations):
     """
-    Interrupts the optimization if the mean gradient norm of the last update step was lower than a certain threshhold.
-
-    :param _optimizer: the optimizer (not needed here)
-    :param params: the image parameters
-    :param thresh: the interruption threshold
-
-    :returns: true if the gradient norm was smaller than threshold
+    Interrupts the optimization if the relative change in activations in a 1000-step window was below threshold.
     """
+    winsize = 1000
 
-    mean_grad_norm = np.mean(
-        [torch.norm(p.grad, p=2).detach().cpu().numpy() for p in params]
-    )
+    # just continue if we haven't even collected enough values
+    if len(mean_activations) < winsize:
+        return False
 
-    return mean_grad_norm < thresh
+    window = mean_activations[-winsize:]
+
+    first_half = np.mean(window[:winsize//2])
+    second_half = np.mean(window[winsize//2:])
+
+    return second_half <= first_half
 
 
 def render_vis(
@@ -59,6 +59,9 @@ def render_vis(
     image_name=None,
     show_inline=False,
     fixed_image_size=None,
+    # additional parameters
+    layer=None,
+    channel : int = 0,
     min_steps = 2560,
     interrupt_interval : int = 0,
     interrupt_condition=None,
@@ -67,7 +70,7 @@ def render_vis(
     Adapted version of render_vis that supports interrupting the optimization procedure when a condition is fulfilled.
     min_steps is the minimum number of steps that should always be made, irrespective of gradient norm
     interrupt_interval is the number of steps between evaluating the condition
-    interrupt_condition is a function that takes optimizer and params and returns true if the optimization should be interrupted
+    interrupt_condition is a function that takes optimizer, params and activations and returns true if the optimization should be interrupted
     """
 
     if param_f is None:
@@ -109,7 +112,7 @@ def render_vis(
 
     transform_f = transform.compose(transforms)
 
-    with ModelHook(model, image_f) as hook:
+    with ModelHook(model, image_f, layer_names=[layer]) as hook:
         objective_f = objectives.as_objective(objective_f)
 
         if verbose:
@@ -117,7 +120,7 @@ def render_vis(
             print("Initial loss: {:.3f}".format(objective_f(hook)))
 
         images = []
-        # grad_norms = []
+        mean_activations = []
         try:
             for i in tqdm(range(1, max(thresholds) + 1), disable=(not progress)):
                 def closure():
@@ -140,6 +143,17 @@ def render_vis(
                     return loss
 
                 optimizer.step(closure)
+
+                acts = hook(layer)
+
+                # get mean for each channel for conv-layers
+                if len(acts.shape) > 2:
+                    acts = torch.mean(acts, dim=(-1, -2)) # NxC
+
+                # calculate mean activation over the batch
+                mean_act = acts[:, channel].mean().detach().cpu().numpy()
+                mean_activations.append(mean_act)
+
                 if i in thresholds:
                     image = tensor_to_img_array(image_f())
                     if verbose:
@@ -148,14 +162,8 @@ def render_vis(
                             show(image)
                     images.append(image)
 
-                # for plotting, to get an idea of what even to expect
-                # mean_grad_norm = np.mean(
-                #     [torch.norm(p.grad, p=2).detach().cpu().numpy() for p in params]
-                # )
-                # grad_norms.append(mean_grad_norm)
-
                 if interrupt_condition is not None and i > min_steps and i % interrupt_interval == 0:
-                    if interrupt_condition(optimizer, params):
+                    if interrupt_condition(optimizer, params, mean_activations):
                         if verbose:
                             print(f"Interrupting due to condition at step {i}")
                         image = tensor_to_img_array(image_f())
@@ -174,7 +182,7 @@ def render_vis(
         show(tensor_to_img_array(image_f()))
     elif show_image:
         view(image_f())
-    return images #, grad_norms
+    return images #, mean_activations
 
 
 def tensor_to_img_array(tensor):
