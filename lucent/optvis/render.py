@@ -26,12 +26,10 @@ from lucent.optvis import objectives, transform, param
 from lucent.misc.io import show
 
 
-def pixelwise_gradient_change_interrupt(_optimizer, _params, smooth_pixelwise_grads):
+def pixelwise_gradient_change_interrupt(_optimizer, _params, smooth_pixelwise_grads, winsize=2000, target_ratio=1.1):
     """
-    Interrupts the optimization if the relative change in pixelwise grads in a 1000-step window was below threshold.
+    Interrupts the optimization if the relative change in pixelwise grads in a certain window was below threshold.
     """
-
-    winsize = 2000
 
     # just continue if we haven't even collected enough values
     if len(smooth_pixelwise_grads) < winsize:
@@ -42,7 +40,7 @@ def pixelwise_gradient_change_interrupt(_optimizer, _params, smooth_pixelwise_gr
 
     ratio = first_half / second_half
 
-    return ratio <= 1.1
+    return ratio <= target_ratio
 
 
 def render_vis(
