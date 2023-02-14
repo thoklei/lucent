@@ -26,22 +26,23 @@ from lucent.optvis import objectives, transform, param
 from lucent.misc.io import show
 
 
-def activation_change_interrupt(_optimizer, _params, mean_activations):
+def pixelwise_gradient_change_interrupt(_optimizer, _params, smooth_pixelwise_grads):
     """
-    Interrupts the optimization if the relative change in activations in a 1000-step window was below threshold.
+    Interrupts the optimization if the relative change in pixelwise grads in a 1000-step window was below threshold.
     """
-    winsize = 1000
+
+    winsize = 2000
 
     # just continue if we haven't even collected enough values
-    if len(mean_activations) < winsize:
+    if len(smooth_pixelwise_grads) < winsize:
         return False
 
-    window = mean_activations[-winsize:]
+    first_half = np.mean(smooth_pixelwise_grads[-winsize:-winsize//2])
+    second_half = np.mean(smooth_pixelwise_grads[-winsize//2:])
 
-    first_half = np.mean(window[:winsize//2])
-    second_half = np.mean(window[winsize//2:])
+    ratio = first_half / second_half
 
-    return second_half <= first_half
+    return ratio <= 1.1
 
 
 def render_vis(
@@ -61,16 +62,19 @@ def render_vis(
     fixed_image_size=None,
     # additional parameters
     layer=None,
-    channel : int = 0,
-    min_steps = 2560,
-    interrupt_interval : int = 0,
+    channel=0,
+    min_steps=2500,
+    interrupt_interval=0,
     interrupt_condition=None,
+    smoothing_weight=0.99
 ):
     """
     Adapted version of render_vis that supports interrupting the optimization procedure when a condition is fulfilled.
+    layer and channel are the layer and channel of the targeted unit TODO get this from the objective?
     min_steps is the minimum number of steps that should always be made, irrespective of gradient norm
     interrupt_interval is the number of steps between evaluating the condition
-    interrupt_condition is a function that takes optimizer, params and activations and returns true if the optimization should be interrupted
+    interrupt_condition is a function that takes optimizer, params, activations and mean absolute gradients in image-space and returns true if the optimization should be interrupted
+    smoothing_weight is the weight used in the exponential smoothing of mean gradients
     """
 
     if param_f is None:
@@ -112,7 +116,21 @@ def render_vis(
 
     transform_f = transform.compose(transforms)
 
-    with ModelHook(model, image_f, layer_names=[layer]) as hook:
+    # TODO this only works for optimisation in Fourier Space now, support pixel space as well
+    def get_mean_px_grad(): 
+        fft_grads = params[0].grad
+
+        if type(fft_grads) is not torch.complex64:
+            fft_grads = torch.view_as_complex(fft_grads)
+
+        _, _, h, w = image_shape
+        # NOTE in lucent.param.spatial.fft_image(), they scale the spectrum first
+        ifft = torch.fft.irfftn(fft_grads, s=(h,w), norm='ortho')
+
+        # always look at the max of the batch, to make sure that even the worst image is okay
+        return torch.norm(ifft, p=2, dim=(1,2,3)).max().detach().cpu().numpy()
+
+    with ModelHook(model, image_f) as hook:
         objective_f = objectives.as_objective(objective_f)
 
         if verbose:
@@ -120,7 +138,7 @@ def render_vis(
             print("Initial loss: {:.3f}".format(objective_f(hook)))
 
         images = []
-        mean_activations = []
+        smooth_pixelwise_grads = []
         try:
             for i in tqdm(range(1, max(thresholds) + 1), disable=(not progress)):
                 def closure():
@@ -150,9 +168,13 @@ def render_vis(
                 if len(acts.shape) > 2:
                     acts = torch.mean(acts, dim=(-1, -2)) # NxC
 
-                # calculate mean activation over the batch
-                mean_act = acts[:, channel].mean().detach().cpu().numpy()
-                mean_activations.append(mean_act)
+                # calculate mean absolute pixel-wise change in image-space
+                mean_px_grad = get_mean_px_grad()
+
+                # calculate exponentially smoothed value and append to list
+                last = smooth_pixelwise_grads[-1] if smooth_pixelwise_grads else mean_px_grad
+                smoothed_val = last * smoothing_weight + (1 - smoothing_weight) * mean_px_grad
+                smooth_pixelwise_grads.append(smoothed_val)
 
                 if i in thresholds:
                     image = tensor_to_img_array(image_f())
@@ -163,7 +185,7 @@ def render_vis(
                     images.append(image)
 
                 if interrupt_condition is not None and i > min_steps and i % interrupt_interval == 0:
-                    if interrupt_condition(optimizer, params, mean_activations):
+                    if interrupt_condition(optimizer, params, smooth_pixelwise_grads):
                         if verbose:
                             print(f"Interrupting due to condition at step {i}")
                         image = tensor_to_img_array(image_f())
@@ -182,7 +204,7 @@ def render_vis(
         show(tensor_to_img_array(image_f()))
     elif show_image:
         view(image_f())
-    return images #, mean_activations
+    return images #, smooth_pixelwise_grads
 
 
 def tensor_to_img_array(tensor):
