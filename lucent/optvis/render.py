@@ -64,7 +64,8 @@ def render_vis(
     min_steps=2500,
     interrupt_interval=0,
     interrupt_condition=None,
-    smoothing_weight=0.99
+    smoothing_weight=0.99,
+    return_smooth_grads=False
 ):
     """
     Adapted version of render_vis that supports interrupting the optimization procedure when a condition is fulfilled.
@@ -73,6 +74,7 @@ def render_vis(
     interrupt_interval is the number of steps between evaluating the condition
     interrupt_condition is a function that takes optimizer, params, activations and mean absolute gradients in image-space and returns true if the optimization should be interrupted
     smoothing_weight is the weight used in the exponential smoothing of mean gradients
+    if return_smooth_grads is True, not only the images but also the sequence of gradients is returned
     """
 
     if param_f is None:
@@ -81,6 +83,7 @@ def render_vis(
     # params - parameters to update, which we pass to the optimizer
     # image_f - a function that returns an image as a tensor
     params, image_f = param_f()
+    assert len(params[0].shape) == 5, "Only works for optimization in Fourier space!" # no other way of telling, param_f could be anything
 
     if optimizer is None:
         optimizer = lambda params: torch.optim.Adam(params, lr=5e-2)
@@ -114,9 +117,8 @@ def render_vis(
 
     transform_f = transform.compose(transforms)
 
-    # TODO this only works for optimisation in Fourier Space now, support pixel space as well
-    def get_mean_px_grad(): 
-        fft_grads = params[0].grad
+    @torch.no_grad()
+    def get_mean_px_grad(fft_grads):
 
         if type(fft_grads) is not torch.complex64:
             fft_grads = torch.view_as_complex(fft_grads)
@@ -167,7 +169,7 @@ def render_vis(
                     acts = torch.mean(acts, dim=(-1, -2)) # NxC
 
                 # calculate mean absolute pixel-wise change in image-space
-                mean_px_grad = get_mean_px_grad()
+                mean_px_grad = get_mean_px_grad(params[0].grad)
 
                 # calculate exponentially smoothed value and append to list
                 last = smooth_pixelwise_grads[-1] if smooth_pixelwise_grads else mean_px_grad
@@ -202,8 +204,11 @@ def render_vis(
         show(tensor_to_img_array(image_f()))
     elif show_image:
         view(image_f())
-    return images #, smooth_pixelwise_grads
 
+    if return_smooth_grads:
+        return images, smooth_pixelwise_grads
+    
+    return images
 
 def tensor_to_img_array(tensor):
     image = tensor.cpu().detach().numpy()
